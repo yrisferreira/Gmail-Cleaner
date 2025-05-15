@@ -28,12 +28,35 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 # Palavras-chave que podem indicar spam
 SPAM_KEYWORDS = [
+    # Palavras promocionais básicas
     'oferta', 'promoção', 'desconto', 'ganhe', 'grátis',
     'lottery', 'winner', 'congratulations', 'prize',
     'urgent', 'urgente', 'importante', 'atenção',
     'milhões', 'dinheiro fácil', 'renda extra',
     'trabalhe de casa', 'oportunidade única',
-    'cartão de crédito', 'empréstimo'
+    'cartão de crédito', 'empréstimo',
+    '10% OFF', 'vem ver', 'é por pouco tempo',
+    'tempo limitado', 'última chance',
+    
+    # Novas palavras e frases
+    'que combinam com tudo',
+    'conheça',
+    'o mais desejado',
+    'mega',
+    'savings',
+    'transformación',
+    'líder',
+    'empieza ahora',
+    'depressa',
+    
+    # Frases exatas
+    'brincos que combinam com tudo',
+    'o mais desejado do momento',
+    'mega may savings',
+    'tu transformación como líder',
+    
+    # Palavras com emojis comuns
+    '💜', '🔥', '😱', '🚀'
 ]
 
 # Domínios comumente associados a spam
@@ -148,6 +171,19 @@ def parse_email_date(date_str: str) -> datetime:
     # Se nada funcionar, retorna a data atual
     return datetime.now(pytz.UTC)
 
+def has_promotional_patterns(subject: str) -> bool:
+    """Verifica padrões promocionais específicos no assunto."""
+    patterns = [
+        r'\b\d+%\s*(OFF|DESCONTO)\b',  # Matches: "50% OFF", "30% DESCONTO"
+        r'[!?]{2,}',                    # Múltiplos ! ou ?
+        r'[\u2700-\u27BF\U0001F300-\U0001F9FF]',  # Emojis
+        r'\b[A-Z]{3,}\b',              # Palavras em MAIÚSCULAS
+        r'urgente|importante|último\s*dia',  # Palavras de urgência
+        r'💜|🔥|😱|🚀'                 # Emojis específicos
+    ]
+    
+    return any(re.search(pattern, subject, re.IGNORECASE) for pattern in patterns)
+
 def is_spam(message: Dict[str, Any]) -> bool:
     """Verifica se um e-mail é spam baseado em critérios específicos."""
     try:
@@ -173,19 +209,22 @@ def is_spam(message: Dict[str, Any]) -> bool:
             'newsletter' in headers.get('list-id', '').lower(),
             
             # Verificação de palavras-chave no assunto
-            any(word in subject for word in SPAM_KEYWORDS),
+            any(word.lower() in subject.lower() for word in SPAM_KEYWORDS),
             
             # Verificação de domínios suspeitos
             any(domain in from_email for domain in SPAM_DOMAINS),
             
             # Verificação de caracteres especiais excessivos no assunto
-            len(re.findall(r'[!$%*#@]', subject)) > 3,
+            len(re.findall(r'[!$%*#@]', subject)) > 2,
             
             # Emails muito antigos (mais de 1 ano)
             received_date < current_time - timedelta(days=365),
             
             # Emails com assuntos muito longos
-            len(subject) > 150
+            len(subject) > 150,
+            
+            # Verificação de padrões promocionais
+            has_promotional_patterns(subject)
         ]
         
         return any(spam_indicators)
@@ -251,6 +290,53 @@ def process_emails(service: Any, max_results: int = 500) -> None:
     except Exception as e:
         logging.error(f'Erro inesperado: {e}')
 
+def clean_spam_folder(service: Any) -> None:
+    """Limpa a pasta de spam movendo todos os emails para a lixeira."""
+    try:
+        # Lista todos os e-mails da pasta spam
+        results = service.users().messages().list(
+            userId='me',
+            labelIds=['SPAM'],
+            maxResults=500
+        ).execute()
+        
+        messages = results.get('messages', [])
+
+        if not messages:
+            logging.info('Nenhum e-mail encontrado na pasta de spam.')
+            return
+
+        total_processed = 0
+        
+        for message in messages:
+            try:
+                # Move para a lixeira
+                service.users().messages().trash(
+                    userId='me', 
+                    id=message['id']
+                ).execute()
+                total_processed += 1
+                
+                # Log de progresso a cada 10 emails
+                if total_processed % 10 == 0:
+                    logging.info(
+                        f'Progresso pasta spam: {total_processed}/{len(messages)} emails movidos para lixeira'
+                    )
+                    
+            except Exception as e:
+                logging.error(f'Erro ao processar email da pasta spam {message["id"]}: {e}')
+                continue
+
+        logging.info(
+            f'Limpeza da pasta spam concluída!\n'
+            f'Total de emails movidos para lixeira: {total_processed}'
+        )
+
+    except HttpError as error:
+        logging.error(f'Erro na API do Gmail ao limpar pasta spam: {error}')
+    except Exception as e:
+        logging.error(f'Erro inesperado ao limpar pasta spam: {e}')
+
 def clean_gmail() -> None:
     """Função principal para limpar o Gmail."""
     service = get_gmail_service()
@@ -258,6 +344,12 @@ def clean_gmail() -> None:
         logging.error('Não foi possível iniciar o serviço do Gmail')
         return
 
+    # Primeiro limpa a pasta de spam
+    logging.info('Iniciando limpeza da pasta spam...')
+    clean_spam_folder(service)
+    
+    # Depois processa emails normais procurando por spam
+    logging.info('Iniciando análise de emails em busca de spam...')
     process_emails(service)
 
 def main():
